@@ -4,19 +4,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,11 +21,6 @@ public class FoodDonationServer {
     private static final int PORT = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
     private static final String ADMIN_USERNAME = System.getenv().getOrDefault("ADMIN_USERNAME", "admin");
     private static final String ADMIN_PASSWORD = System.getenv().getOrDefault("ADMIN_PASSWORD", "admin123");
-    private static final String DATABASE_URL = System.getenv().getOrDefault("DATABASE_URL", "postgresql://sharetable:MfrMqynnUI4XgG0NS5dGQLiLHgRr319r@dpg-dan9thjtqb8s73b5od7g-a/sharetable");
-    private static final boolean DATABASE_ENABLED = !DATABASE_URL.isBlank();
-    private static String jdbcUrl;
-    private static String databaseUser;
-    private static String databasePassword;
     private static final Path ACCOUNTS_FILE = Paths.get("accounts.txt");
     private static final Path MESSAGES_FILE = Paths.get("messages.txt");
     private static final List<Donation> donations = new ArrayList<>();
@@ -40,10 +28,8 @@ public class FoodDonationServer {
     private static final Map<String, UserAccount> accounts = new HashMap<>();
 
     public static void main(String[] args) throws IOException {
-        initializeDatabase();
         loadAccounts();
         loadMessages();
-        loadDonations();
         HttpServer server = HttpServer.create(new InetSocketAddress("0.0.0.0", PORT), 0);
         server.createContext("/", FoodDonationServer::handleRequest);
         server.setExecutor(Executors.newCachedThreadPool());
@@ -175,84 +161,12 @@ public class FoodDonationServer {
         synchronized (accounts) {
             if (accounts.containsKey(username)) return "That username is already registered.";
             accounts.put(username, new UserAccount(role, password, phone));
-            if (DATABASE_ENABLED) saveAccountToDatabase(username, role, password, phone);
-            else saveAccounts();
+            saveAccounts();
         }
         return "";
     }
 
-    private static void initializeDatabase() {
-        if (!DATABASE_ENABLED) return;
-        try {
-            URI database = URI.create(DATABASE_URL.replaceFirst("^postgres://", "postgresql://"));
-            jdbcUrl = "jdbc:" + database;
-            String userInfo = database.getUserInfo();
-            if (userInfo != null) {
-                String[] credentials = userInfo.split(":", 2);
-                databaseUser = URLDecoder.decode(credentials[0], StandardCharsets.UTF_8);
-                databasePassword = credentials.length > 1 ? URLDecoder.decode(credentials[1], StandardCharsets.UTF_8) : "";
-            } else {
-                databaseUser = System.getenv().getOrDefault("DB_USER", "");
-                databasePassword = System.getenv().getOrDefault("DB_PASSWORD", "");
-            }
-            try (Connection connection = databaseConnection(); Statement statement = connection.createStatement()) {
-                statement.executeUpdate("CREATE TABLE IF NOT EXISTS accounts (username VARCHAR(24) PRIMARY KEY, role VARCHAR(16) NOT NULL, password TEXT NOT NULL, phone VARCHAR(25) NOT NULL DEFAULT '')");
-                statement.executeUpdate("CREATE TABLE IF NOT EXISTS donations (id SERIAL PRIMARY KEY, food TEXT NOT NULL, quantity TEXT NOT NULL, pickup TEXT NOT NULL, posted_date TEXT NOT NULL, status VARCHAR(32) NOT NULL, donor_username VARCHAR(24) NOT NULL, consumer_username VARCHAR(24) NOT NULL DEFAULT '', donor_phone VARCHAR(25) NOT NULL DEFAULT '', donor_given BOOLEAN NOT NULL DEFAULT FALSE, consumer_got BOOLEAN NOT NULL DEFAULT FALSE)");
-                statement.executeUpdate("CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, sender VARCHAR(24) NOT NULL, recipient VARCHAR(24) NOT NULL, body TEXT NOT NULL, donation_id VARCHAR(32) NOT NULL DEFAULT '', message_date TEXT NOT NULL)");
-            }
-            System.out.println("PostgreSQL persistence is enabled.");
-        } catch (SQLException | IllegalArgumentException error) {
-            throw new IllegalStateException("DATABASE_URL is configured but PostgreSQL could not be initialized.", error);
-        }
-    }
-
-    private static Connection databaseConnection() throws SQLException {
-        return databaseUser == null || databaseUser.isEmpty()
-                ? DriverManager.getConnection(jdbcUrl)
-                : DriverManager.getConnection(jdbcUrl, databaseUser, databasePassword);
-    }
-
-    private static void saveAccountToDatabase(String username, String role, String password, String phone) {
-        try (Connection connection = databaseConnection(); PreparedStatement statement = connection.prepareStatement("INSERT INTO accounts (username, role, password, phone) VALUES (?, ?, ?, ?)")) {
-            statement.setString(1, username);
-            statement.setString(2, role);
-            statement.setString(3, password);
-            statement.setString(4, phone);
-            statement.executeUpdate();
-        } catch (SQLException error) {
-            throw new IllegalStateException("Could not save account to PostgreSQL.", error);
-        }
-    }
-
-    private static void loadDonations() {
-        if (!DATABASE_ENABLED) return;
-        try (Connection connection = databaseConnection(); Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("SELECT id, food, quantity, pickup, posted_date, status, donor_username, consumer_username, donor_phone, donor_given, consumer_got FROM donations ORDER BY id")) {
-            synchronized (donations) {
-                donations.clear();
-                while (results.next()) {
-                    Donation donation = new Donation(results.getInt("id"), results.getString("food"), results.getString("quantity"), results.getString("pickup"), results.getString("posted_date"), results.getString("status"), results.getString("donor_username"), results.getString("consumer_username"), results.getString("donor_phone"));
-                    donation.donorGiven = results.getBoolean("donor_given");
-                    donation.consumerGot = results.getBoolean("consumer_got");
-                    donations.add(donation);
-                }
-            }
-        } catch (SQLException error) {
-            throw new IllegalStateException("Could not load donations from PostgreSQL.", error);
-        }
-    }
-
     private static void loadAccounts() {
-        if (DATABASE_ENABLED) {
-            try (Connection connection = databaseConnection(); Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("SELECT username, role, password, phone FROM accounts ORDER BY username")) {
-                synchronized (accounts) {
-                    accounts.clear();
-                    while (results.next()) accounts.put(results.getString("username"), new UserAccount(results.getString("role"), results.getString("password"), results.getString("phone")));
-                }
-                return;
-            } catch (SQLException error) {
-                throw new IllegalStateException("Could not load accounts from PostgreSQL.", error);
-            }
-        }
         if (!Files.exists(ACCOUNTS_FILE)) return;
         try {
             for (String line : Files.readAllLines(ACCOUNTS_FILE, StandardCharsets.UTF_8)) {
@@ -283,40 +197,7 @@ public class FoodDonationServer {
         synchronized (donations) {
             String phone = clean(form.getOrDefault("phone", ""));
             if (!phone.matches("[0-9+() .-]{7,25}")) phone = accounts.containsKey(donorUsername) ? accounts.get(donorUsername).phone : "";
-            int id = DATABASE_ENABLED ? saveDonationToDatabase(food, quantity, pickup, donorUsername, phone) : donations.size() + 1;
-            donations.add(new Donation(id, food, quantity, pickup, "Today", "Available", donorUsername, "", phone));
-        }
-    }
-
-    private static int saveDonationToDatabase(String food, String quantity, String pickup, String donorUsername, String phone) {
-        try (Connection connection = databaseConnection(); PreparedStatement statement = connection.prepareStatement("INSERT INTO donations (food, quantity, pickup, posted_date, status, donor_username, donor_phone) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id")) {
-            statement.setString(1, food);
-            statement.setString(2, quantity);
-            statement.setString(3, pickup);
-            statement.setString(4, "Today");
-            statement.setString(5, "Available");
-            statement.setString(6, donorUsername);
-            statement.setString(7, phone);
-            try (ResultSet result = statement.executeQuery()) {
-                result.next();
-                return result.getInt(1);
-            }
-        } catch (SQLException error) {
-            throw new IllegalStateException("Could not save donation to PostgreSQL.", error);
-        }
-    }
-
-    private static void persistDonationState(Donation donation) {
-        if (!DATABASE_ENABLED) return;
-        try (Connection connection = databaseConnection(); PreparedStatement statement = connection.prepareStatement("UPDATE donations SET status = ?, consumer_username = ?, donor_given = ?, consumer_got = ? WHERE id = ?")) {
-            statement.setString(1, donation.status);
-            statement.setString(2, donation.consumerUsername);
-            statement.setBoolean(3, donation.donorGiven);
-            statement.setBoolean(4, donation.consumerGot);
-            statement.setInt(5, donation.id);
-            statement.executeUpdate();
-        } catch (SQLException error) {
-            throw new IllegalStateException("Could not update donation in PostgreSQL.", error);
+            donations.add(new Donation(donations.size() + 1, food, quantity, pickup, "Today", "Available", donorUsername, "", phone));
         }
     }
 
@@ -327,7 +208,6 @@ public class FoodDonationServer {
                 if (String.valueOf(donation.id).equals(id) && "Available".equals(donation.status)) {
                     donation.status = "Claim requested";
                     donation.consumerUsername = consumerUsername;
-                    persistDonationState(donation);
                 }
             }
         }
@@ -348,7 +228,6 @@ public class FoodDonationServer {
                 if (String.valueOf(donation.id).equals(id) && donation.donorUsername.equals(donorUsername)
                         && "Claim requested".equals(donation.status)) {
                     donation.status = status;
-                    persistDonationState(donation);
                 }
             }
         }
@@ -362,7 +241,6 @@ public class FoodDonationServer {
                         && !donation.consumerUsername.isEmpty() && "Request accepted".equals(donation.status)) {
                     donation.donorGiven = true;
                     donation.status = "Food given";
-                    persistDonationState(donation);
                 }
             }
         }
@@ -376,7 +254,6 @@ public class FoodDonationServer {
                         && donation.donorGiven && "Food given".equals(donation.status)) {
                     donation.consumerGot = true;
                     donation.status = "Collected";
-                    persistDonationState(donation);
                 }
             }
         }
@@ -391,38 +268,12 @@ public class FoodDonationServer {
             if (!accounts.containsKey(recipient)) return;
         }
         synchronized (messages) {
-            Message message = new Message(sender, recipient, body, donationId, LocalDate.now().toString());
-            messages.add(message);
-            if (DATABASE_ENABLED) saveMessageToDatabase(message);
-            else saveMessages();
-        }
-    }
-
-    private static void saveMessageToDatabase(Message message) {
-        try (Connection connection = databaseConnection(); PreparedStatement statement = connection.prepareStatement("INSERT INTO messages (sender, recipient, body, donation_id, message_date) VALUES (?, ?, ?, ?, ?)")) {
-            statement.setString(1, message.sender);
-            statement.setString(2, message.recipient);
-            statement.setString(3, message.body);
-            statement.setString(4, message.donationId);
-            statement.setString(5, message.date);
-            statement.executeUpdate();
-        } catch (SQLException error) {
-            throw new IllegalStateException("Could not save message to PostgreSQL.", error);
+            messages.add(new Message(sender, recipient, body, donationId, LocalDate.now().toString()));
+            saveMessages();
         }
     }
 
     private static void loadMessages() {
-        if (DATABASE_ENABLED) {
-            try (Connection connection = databaseConnection(); Statement statement = connection.createStatement(); ResultSet results = statement.executeQuery("SELECT sender, recipient, body, donation_id, message_date FROM messages ORDER BY id")) {
-                synchronized (messages) {
-                    messages.clear();
-                    while (results.next()) messages.add(new Message(results.getString("sender"), results.getString("recipient"), results.getString("body"), results.getString("donation_id"), results.getString("message_date")));
-                }
-                return;
-            } catch (SQLException error) {
-                throw new IllegalStateException("Could not load messages from PostgreSQL.", error);
-            }
-        }
         if (!Files.exists(MESSAGES_FILE)) return;
         try {
             for (String line : Files.readAllLines(MESSAGES_FILE, StandardCharsets.UTF_8)) {
@@ -435,7 +286,6 @@ public class FoodDonationServer {
     }
 
     private static void saveMessages() {
-        if (DATABASE_ENABLED) return;
         List<String> lines = new ArrayList<>();
         for (Message message : messages) {
             lines.add(message.sender + "|" + message.recipient + "|" + message.body.replace("|", " ") + "|" + message.donationId + "|" + message.date);

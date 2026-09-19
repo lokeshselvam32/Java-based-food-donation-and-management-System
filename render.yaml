@@ -6,18 +6,3 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     autoDeploy: true
-    envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: sharetable-db
-          property: connectionString
-      - key: ADMIN_USERNAME
-        sync: false
-      - key: ADMIN_PASSWORD
-        sync: false
-
-databases:
-  - name: sharetable-db
-    plan: free
-    databaseName: sharetable
-    user: sharetable
