@@ -43,6 +43,10 @@ public class FoodDonationServer {
         String method = exchange.getRequestMethod();
         Map<String, String> params = parseParams(exchange.getRequestURI().getRawQuery());
 
+        if ("GET".equals(method) && "/logo.svg".equals(path)) {
+            sendSvg(exchange);
+            return;
+        }
         if ("GET".equals(method) && "/".equals(path)) {
             sendHtml(exchange, loginPage(params.get("error")));
             return;
@@ -98,27 +102,27 @@ public class FoodDonationServer {
             return;
         }
         if ("POST".equals(method) && "/claim".equals(path) && "consumer".equals(role)) {
-            claimDonation(params.get("id"), cookieValue(exchange, "username"));
+            claimDonation(params.get("id"), parseBody(exchange), cookieValue(exchange, "username"));
             redirect(exchange, "/dashboard?view=consumer&claimed=1");
             return;
         }
         if ("POST".equals(method) && "/accept".equals(path) && "donor".equals(role)) {
-            acceptClaim(params.get("id"), cookieValue(exchange, "username"));
+            acceptClaim(params.get("id"), params.get("claim"), cookieValue(exchange, "username"));
             redirect(exchange, "/dashboard?view=donor&accepted=1");
             return;
         }
         if ("POST".equals(method) && "/reject".equals(path) && "donor".equals(role)) {
-            rejectClaim(params.get("id"), cookieValue(exchange, "username"));
+            rejectClaim(params.get("id"), params.get("claim"), cookieValue(exchange, "username"));
             redirect(exchange, "/dashboard?view=donor&rejected=1");
             return;
         }
         if ("POST".equals(method) && "/given".equals(path) && "donor".equals(role)) {
-            confirmGiven(params.get("id"), cookieValue(exchange, "username"));
+            confirmGiven(params.get("id"), params.get("claim"), cookieValue(exchange, "username"));
             redirect(exchange, "/dashboard?view=donor&given=1");
             return;
         }
         if ("POST".equals(method) && "/got".equals(path) && "consumer".equals(role)) {
-            confirmGot(params.get("id"), cookieValue(exchange, "username"));
+            confirmGot(params.get("id"), params.get("claim"), cookieValue(exchange, "username"));
             redirect(exchange, "/dashboard?view=consumer&got=1");
             return;
         }
@@ -194,69 +198,106 @@ public class FoodDonationServer {
         String food = clean(form.getOrDefault("food", "Mixed food"));
         String quantity = clean(form.getOrDefault("quantity", "1 box"));
         String pickup = clean(form.getOrDefault("pickup", "Community center"));
+        String pickupTime = clean(form.getOrDefault("pickupTime", ""));
         synchronized (donations) {
             String phone = clean(form.getOrDefault("phone", ""));
             if (!phone.matches("[0-9+() .-]{7,25}")) phone = accounts.containsKey(donorUsername) ? accounts.get(donorUsername).phone : "";
-            donations.add(new Donation(donations.size() + 1, food, quantity, pickup, "Today", "Available", donorUsername, "", phone));
+            donations.add(new Donation(donations.size() + 1, food, quantity, pickup, pickupTime, "Today", "Available", donorUsername, "", phone));
         }
     }
 
-    private static void claimDonation(String id, String consumerUsername) {
+    private static void claimDonation(String id, Map<String, String> form, String consumerUsername) {
         if (id == null) return;
+        int requestedQuantity;
+        try {
+            requestedQuantity = Integer.parseInt(form.getOrDefault("requestedQuantity", "0").trim());
+        } catch (NumberFormatException ignored) {
+            return;
+        }
+        if (requestedQuantity < 1) return;
         synchronized (donations) {
             for (Donation donation : donations) {
-                if (String.valueOf(donation.id).equals(id) && "Available".equals(donation.status)) {
-                    donation.status = "Claim requested";
-                    donation.consumerUsername = consumerUsername;
+                if (String.valueOf(donation.id).equals(id) && donation.remainingQuantity >= requestedQuantity
+                        && !hasClaim(donation, consumerUsername)) {
+                    donation.remainingQuantity -= requestedQuantity;
+                    donation.claims.add(new Claim(donation.claims.size() + 1, consumerUsername, requestedQuantity));
+                    donation.status = donation.remainingQuantity > 0 ? "Available" : "Fully reserved";
                 }
             }
         }
     }
 
-    private static void acceptClaim(String id, String donorUsername) {
-        updateClaimDecision(id, donorUsername, "Request accepted");
+    private static void acceptClaim(String id, String claimId, String donorUsername) {
+        updateClaimDecision(id, claimId, donorUsername, "Request accepted");
     }
 
-    private static void rejectClaim(String id, String donorUsername) {
-        updateClaimDecision(id, donorUsername, "Request rejected");
+    private static void rejectClaim(String id, String claimId, String donorUsername) {
+        updateClaimDecision(id, claimId, donorUsername, "Request rejected");
     }
 
-    private static void updateClaimDecision(String id, String donorUsername, String status) {
-        if (id == null) return;
+    private static void updateClaimDecision(String id, String claimId, String donorUsername, String status) {
+        if (id == null || claimId == null) return;
         synchronized (donations) {
             for (Donation donation : donations) {
-                if (String.valueOf(donation.id).equals(id) && donation.donorUsername.equals(donorUsername)
-                        && "Claim requested".equals(donation.status)) {
-                    donation.status = status;
+                Claim claim = findClaim(donation, claimId);
+                if (String.valueOf(donation.id).equals(id) && claim != null && donation.donorUsername.equals(donorUsername)
+                        && "Claim requested".equals(claim.status)) {
+                    claim.status = status;
+                    if ("Request rejected".equals(status)) donation.remainingQuantity += claim.quantity;
+                    donation.status = donation.remainingQuantity > 0 ? "Available" : "Fully reserved";
                 }
             }
         }
     }
 
-    private static void confirmGiven(String id, String donorUsername) {
-        if (id == null) return;
+    private static void confirmGiven(String id, String claimId, String donorUsername) {
+        if (id == null || claimId == null) return;
         synchronized (donations) {
             for (Donation donation : donations) {
-                if (String.valueOf(donation.id).equals(id) && donation.donorUsername.equals(donorUsername)
-                        && !donation.consumerUsername.isEmpty() && "Request accepted".equals(donation.status)) {
-                    donation.donorGiven = true;
-                    donation.status = "Food given";
+                Claim claim = findClaim(donation, claimId);
+                if (String.valueOf(donation.id).equals(id) && claim != null && donation.donorUsername.equals(donorUsername)
+                        && "Request accepted".equals(claim.status)) {
+                    claim.status = "Food given";
                 }
             }
         }
     }
 
-    private static void confirmGot(String id, String consumerUsername) {
-        if (id == null) return;
+    private static void confirmGot(String id, String claimId, String consumerUsername) {
+        if (id == null || claimId == null) return;
         synchronized (donations) {
             for (Donation donation : donations) {
-                if (String.valueOf(donation.id).equals(id) && donation.consumerUsername.equals(consumerUsername)
-                        && donation.donorGiven && "Food given".equals(donation.status)) {
-                    donation.consumerGot = true;
-                    donation.status = "Collected";
+                Claim claim = findClaim(donation, claimId);
+                if (String.valueOf(donation.id).equals(id) && claim != null && claim.consumerUsername.equals(consumerUsername)
+                        && "Food given".equals(claim.status)) {
+                    claim.status = "Collected";
                 }
             }
         }
+    }
+
+    private static boolean hasClaim(Donation donation, String consumerUsername) {
+        for (Claim claim : donation.claims) {
+            if (claim.consumerUsername.equals(consumerUsername) && !"Request rejected".equals(claim.status)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasAnyClaim(Donation donation, String consumerUsername) {
+        for (Claim claim : donation.claims) {
+            if (claim.consumerUsername.equals(consumerUsername)) return true;
+        }
+        return false;
+    }
+
+    private static Claim findClaim(Donation donation, String claimId) {
+        try {
+            int requestedId = Integer.parseInt(claimId);
+            for (Claim claim : donation.claims) if (claim.id == requestedId) return claim;
+        } catch (NumberFormatException ignored) {
+            // Invalid claim ids are ignored.
+        }
+        return null;
     }
 
     private static void sendMessage(Map<String, String> form, String sender) {
@@ -301,6 +342,7 @@ public class FoodDonationServer {
         int available = count("Available");
         int claimed = count("Claim requested") + count("Collected");
         int totalMeals = 0;
+        String accountName = username.isEmpty() ? title(role) : username;
         synchronized (donations) {
             for (Donation donation : donations) {
                 totalMeals += parseQuantity(donation.quantity);
@@ -322,8 +364,8 @@ public class FoodDonationServer {
                     + stat("Available now", String.valueOf(available), "Ready for pickup", "peach")
                     + stat("Requests", String.valueOf(claimed), "In progress", "blue")
                     + "</section>";
-        String body = "<div class='shell'><aside class='sidebar'><div class='brand'><span class='brand-mark'>S</span><span>ShareTable</span></div>"
-                + "<div class='side-label'>Workspace</div>" + nav + "<div class='side-bottom'><div class='profile'><span class='avatar'>" + title(role).charAt(0) + "</span><div><b>" + title(role) + " account</b><small>Active today</small></div></div><a class='logout' href='/logout'>Sign out</a></div></aside>"
+        String body = "<div class='shell'><aside class='sidebar'><div class='brand'><img class='brand-logo' style='display:block;width:184px;height:auto;background:#fff;border-radius:8px' src='/logo.svg' alt='ShareTable logo'></div>"
+                + "<div class='side-label'>Workspace</div>" + nav + "<div class='side-bottom'><div class='profile'><span class='avatar'>" + esc(accountName.substring(0, 1).toUpperCase()) + "</span><div><b>" + esc(accountName) + "</b><small>" + title(role) + " account · Active today</small></div></div><a class='logout' href='/logout'>Sign out</a></div></aside>"
                 + "<main class='main'><header class='topbar'><div><p class='eyebrow'>Good food, shared well</p><h1>" + roleTitle + "</h1></div><div class='top-date'>" + LocalDate.now() + "<span class='live-dot'></span></div></header>" + stats + content + "</main></div>";
         return page("ShareTable | " + roleTitle, body);
     }
@@ -332,12 +374,12 @@ public class FoodDonationServer {
         StringBuilder rows = new StringBuilder();
         synchronized (donations) {
             for (Donation donation : donations) {
-                rows.append("<tr><td><b>#").append(donation.id).append("</b></td><td><strong>").append(esc(donation.food)).append("</strong><small>").append(esc(donation.quantity)).append("</small></td><td>").append(esc(donation.pickup)).append("</td><td><strong>").append(userDetails(donation.donorUsername, donation.donorPhone)).append("</strong></td><td><strong>").append(userDetails(donation.consumerUsername, "")).append("</strong></td><td>").append(badge(donation.status)).append("<small>Given: ").append(donation.donorGiven ? "Yes" : "No").append(" · Received: ").append(donation.consumerGot ? "Yes" : "No").append("</small></td></tr>");
+                rows.append("<tr><td><b>#").append(donation.id).append("</b></td><td><strong>").append(esc(donation.food)).append("</strong><small>").append(esc(donation.quantity)).append("</small></td><td>").append(esc(donation.pickup)).append("<small>Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</small></td><td><strong>").append(userDetails(donation.donorUsername, donation.donorPhone)).append("</strong></td><td><strong>").append(userDetails(donation.consumerUsername, "")).append("</strong></td><td>").append(badge(donation.status)).append("<small>Given: ").append(donation.donorGiven ? "Yes" : "No").append(" · Received: ").append(donation.consumerGot ? "Yes" : "No").append("</small></td></tr>");
             }
         }
         String notice = params.containsKey("messaged") ? "<div class='notice success'>Message sent.</div>" : params.containsKey("given") ? "<div class='notice success'>Food handoff marked as given.</div>" : "";
         return "<div class='admin-layout'>" + notice + "<div class='section-heading admin-heading'><div><p class='eyebrow'>Read-only overview</p><h2>Donor and consumer activity</h2><p class='section-copy'>A traceable record of every request, decision, and food handoff.</p></div><div class='admin-actions'><span class='count-pill'>" + donations.size() + " total records</span><a class='small-button download-button' href='/admin-download'>Download activity</a></div></div>"
-            + "<section class='table-card admin-donations'><table><thead><tr><th>ID</th><th>Food</th><th>Pickup point</th><th>Donor details</th><th>Consumer details</th><th>Handoff record</th></tr></thead><tbody>" + rows + "</tbody></table></section>"
+            + "<section class='table-card admin-donations'><table><thead><tr><th>ID</th><th>Food</th><th>Pickup point and time</th><th>Donor details</th><th>Consumer details</th><th>Handoff record</th></tr></thead><tbody>" + rows + "</tbody></table></section>"
             + "<div class='admin-lower'><div class='admin-directory'>" + accountDirectory() + "</div>" + messagePanel("admin", username) + "</div></div>";
     }
 
@@ -350,12 +392,12 @@ public class FoodDonationServer {
     }
 
     private static void sendActivityCsv(HttpExchange exchange) throws IOException {
-        StringBuilder csv = new StringBuilder("ID,Food,Quantity,Pickup,Donor,Donor phone,Consumer,Consumer phone,Status,Donor given,Consumer received\n");
-        synchronized (donations) {
+        StringBuilder csv = new StringBuilder("ID,Food,Quantity,Pickup,Pickup time,Donor,Donor phone,Consumer,Consumer phone,Status,Donor given,Consumer received\n");
+            synchronized (donations) {
             for (Donation donation : donations) {
                 csv.append(csvValue(String.valueOf(donation.id))).append(',')
                     .append(csvValue(donation.food)).append(',').append(csvValue(donation.quantity)).append(',')
-                    .append(csvValue(donation.pickup)).append(',').append(csvValue(donation.donorUsername)).append(',')
+                    .append(csvValue(donation.pickup)).append(',').append(csvValue(donation.pickupTime)).append(',').append(csvValue(donation.donorUsername)).append(',')
                     .append(csvValue(phoneFor(donation.donorUsername, donation.donorPhone))).append(',')
                     .append(csvValue(donation.consumerUsername)).append(',').append(csvValue(phoneFor(donation.consumerUsername, ""))).append(',')
                     .append(csvValue(donation.status)).append(',').append(donation.donorGiven ? "Yes" : "No").append(',')
@@ -404,7 +446,7 @@ public class FoodDonationServer {
     private static String donorPanel(Map<String, String> params, String username) {
         String notice = params.containsKey("saved") ? "<div class='notice success'>Your donation is now visible to consumers.</div>" : params.containsKey("messaged") ? "<div class='notice success'>Message sent to the consumer.</div>" : params.containsKey("accepted") ? "<div class='notice success'>Consumer request accepted.</div>" : params.containsKey("rejected") ? "<div class='notice success'>Consumer request rejected.</div>" : params.containsKey("given") ? "<div class='notice success'>Food handoff marked as given.</div>" : "";
         return notice + "<div class='section-heading'><div><p class='eyebrow'>Make an impact</p><h2>Share surplus food</h2><p class='section-copy'>Tell local communities what you have available today.</p></div></div>"
-                + "<section class='form-card'><form method='post' action='/donate'><div class='form-grid'><label>Food available<input name='food' required placeholder='e.g. Vegetable biryani'></label><label>Quantity<input name='quantity' required placeholder='e.g. 25 meals'></label><label>Contact phone<input name='phone' required pattern='[0-9+() .-]{7,25}' placeholder='e.g. +1 555 010 2020'></label><label class='wide'>Pickup location<input name='pickup' required placeholder='e.g. 14 Market Street'></label></div><button class='button' type='submit'>Publish donation <span>→</span></button></form></section>"
+                + "<section class='form-card'><form method='post' action='/donate'><div class='form-grid'><label>Food available<input name='food' required placeholder='e.g. Vegetable biryani'></label><label>Quantity<input name='quantity' required placeholder='e.g. 25 meals'></label><label>Contact phone<input name='phone' required pattern='[0-9+() .-]{7,25}' placeholder='e.g. +1 555 010 2020'></label><label>Food pickup time<input name='pickupTime' type='text' required placeholder='e.g. 10:30 AM, noon, or evening'></label><label class='wide'>Pickup location<input name='pickup' required placeholder='e.g. 14 Market Street'></label></div><button class='button' type='submit'>Publish donation <span>→</span></button></form></section>"
                 + "<div class='section-heading compact'><div><p class='eyebrow'>Your activity</p><h2>Recent donations</h2></div></div>" + donationCards("donor", username) + messagePanel("donor", username);
     }
 
@@ -418,22 +460,13 @@ public class FoodDonationServer {
         synchronized (donations) {
             for (Donation donation : donations) {
                 boolean visible = "donor".equals(panel) ? donation.donorUsername.equals(currentUser)
-                        : "Available".equals(donation.status) || donation.consumerUsername.equals(currentUser);
+                        : donation.remainingQuantity > 0 || hasAnyClaim(donation, currentUser);
                 if (visible) {
-                    String action;
-                    if ("consumer".equals(panel) && "Available".equals(donation.status)) {
-                        action = "<form method='post' action='/claim?id=" + donation.id + "'><button class='small-button' type='submit'>Request pickup</button></form>";
-                    } else if ("donor".equals(panel) && donation.donorUsername.equals(currentUser) && !donation.donorGiven && "Claim requested".equals(donation.status)) {
-                        action = "<span class='handoff-actions'><form method='post' action='/accept?id=" + donation.id + "'><button class='small-button' type='submit'>Accept</button></form><form method='post' action='/reject?id=" + donation.id + "'><button class='small-button reject-button' type='submit'>Reject</button></form></span>";
-                    } else if ("donor".equals(panel) && donation.donorUsername.equals(currentUser) && !donation.donorGiven && "Request accepted".equals(donation.status)) {
-                        action = "<form method='post' action='/given?id=" + donation.id + "'><button class='small-button' type='submit'>Given food</button></form>";
-                    } else if ("consumer".equals(panel) && donation.consumerUsername.equals(currentUser) && donation.donorGiven && !donation.consumerGot) {
-                        action = "<form method='post' action='/got?id=" + donation.id + "'><button class='small-button' type='submit'>Got the food</button></form>";
-                    } else {
-                        action = "<span class='card-status'>" + badge(donation.status) + "</span>";
-                    }
+                    String action = "consumer".equals(panel)
+                            ? consumerClaimAction(donation, currentUser)
+                            : donorClaimActions(donation);
                         String donorContact = "consumer".equals(panel) ? donorContact(donation) : "";
-                        cards.append("<article class='donation-card'><div class='food-icon'>").append(foodIcon(donation.food)).append("</div><div class='card-main'><div class='card-top'><span class='category'>DONATION #").append(donation.id).append("</span>").append(badge(donation.status)).append("</div><h3>").append(esc(donation.food)).append("</h3><p class='quantity'>").append(esc(donation.quantity)).append(" <span>•</span> ").append(esc(donation.pickup)).append("</p>").append(donorContact).append("<div class='card-bottom'><small>Posted ").append(donation.date).append("</small>").append(action).append("</div></div></article>");
+                    cards.append("<article class='donation-card'><div class='food-icon'>").append(foodIcon(donation.food)).append("</div><div class='card-main'><div class='card-top'><span class='category'>DONATION #").append(donation.id).append("</span>").append(badge(donation.status)).append("</div><h3>").append(esc(donation.food)).append("</h3><p class='quantity'>").append(esc(donation.quantity)).append(" <span>•</span> ").append(donation.remainingQuantity).append(" remaining <span>•</span> ").append(esc(donation.pickup)).append(" <span>•</span> Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</p>").append(donorContact).append("<div class='card-bottom'><small>Posted ").append(donation.date).append("</small>").append(action).append("</div></div></article>");
                 }
             }
         }
@@ -443,10 +476,48 @@ public class FoodDonationServer {
         return cards.append("</section>").toString();
     }
 
+    private static String consumerClaimAction(Donation donation, String currentUser) {
+        StringBuilder content = new StringBuilder();
+        if (donation.remainingQuantity > 0 && !hasClaim(donation, currentUser)) {
+            content.append("<form class='claim-form' method='post' action='/claim?id=").append(donation.id).append("'><input name='requestedQuantity' type='number' min='1' max='").append(donation.remainingQuantity).append("' required placeholder='How many?'><button class='small-button' type='submit'>Request food</button></form>");
+        }
+        for (Claim claim : donation.claims) {
+            if (claim.consumerUsername.equals(currentUser)) {
+                content.append("<span class='claim-note'>Your request: ").append(claim.quantity).append(" · ").append(badge(claim.status)).append("</span>");
+                if ("Food given".equals(claim.status)) {
+                    content.append("<form method='post' action='/got?id=").append(donation.id).append("&claim=").append(claim.id).append("'><button class='small-button' type='submit'>Got the food</button></form>");
+                }
+            }
+        }
+        return content.toString();
+    }
+
+    private static String donorClaimActions(Donation donation) {
+        if (donation.claims.isEmpty()) return "<span class='card-status'>" + badge(donation.status) + "</span>";
+        StringBuilder content = new StringBuilder("<span class='claim-list'>");
+        for (Claim claim : donation.claims) {
+            content.append("<span class='claim-row'><b>").append(esc(claim.consumerUsername)).append(" · ").append(claim.quantity).append(" food</b>");
+            if ("Claim requested".equals(claim.status)) {
+                content.append("<form method='post' action='/accept?id=").append(donation.id).append("&claim=").append(claim.id).append("'><button class='small-button' type='submit'>Accept</button></form><form method='post' action='/reject?id=").append(donation.id).append("&claim=").append(claim.id).append("'><button class='small-button reject-button' type='submit'>Reject</button></form>");
+            } else if ("Request accepted".equals(claim.status)) {
+                content.append("<form method='post' action='/given?id=").append(donation.id).append("&claim=").append(claim.id).append("'><button class='small-button' type='submit'>Given food</button></form>");
+            } else {
+                content.append(badge(claim.status));
+            }
+            content.append("</span>");
+        }
+        return content.append("</span>").toString();
+    }
+
     private static String donorContact(Donation donation) {
         UserAccount donor = accounts.get(donation.donorUsername);
         String phone = donation.donorPhone.isEmpty() ? donor == null ? "" : donor.phone : donation.donorPhone;
         return "<p class='contact-line'>Donor: <b>" + esc(donation.donorUsername) + "</b>" + (phone.isEmpty() ? "" : " · <a href='tel:" + esc(phone) + "'>" + esc(phone) + "</a>") + "</p>";
+    }
+
+    private static String formatPickupTime(String pickupTime) {
+        if (pickupTime == null || pickupTime.isEmpty()) return "Time not provided";
+        return pickupTime;
     }
 
     private static String messagePanel(String role, String currentUser) {
@@ -480,19 +551,19 @@ public class FoodDonationServer {
 
     private static String loginPage(String error) {
         String notice = error == null ? "" : "<div class='notice error'>" + esc(error) + "</div>";
-        String body = "<div class='login-layout'><div class='login-art'><div class='brand light'><span class='brand-mark'>S</span><span>ShareTable</span></div><div class='art-copy'><p class='eyebrow light-text'>A little extra can go a long way</p><h1>Good food belongs<br>on every table.</h1><p>Coordinate surplus food, local donors, and people who need a helping hand.</p></div><div class='art-footer'><span>♧</span> Building kinder communities, one meal at a time</div></div><div class='login-side'><div class='login-box'><p class='eyebrow'>Welcome to ShareTable</p><h2>Sign in to your workspace</h2><p class='login-subtitle'>Use your registered username and password.</p>" + notice + "<form method='post' action='/login'><label>Workspace role<select name='role'><option value='consumer'>Consumer</option><option value='donor'>Donor</option><option value='admin'>Admin</option></select></label><label>Username<input name='username' required placeholder='Enter username'></label><label>Password<input name='password' type='password' required placeholder='Enter password'></label><button class='button full' type='submit'>Continue <span>→</span></button></form><p class='account-link'>New here? <a href='/register'>Create your own account</a></p></div></div></div>";
+        String body = "<div class='login-layout'><div class='login-art'><div class='brand light'><img class='brand-logo' style='display:block;width:184px;height:auto;background:#fff;border-radius:8px' src='/logo.svg' alt='ShareTable logo'></div><div class='art-copy'><p class='eyebrow light-text'>A little extra can go a long way</p><h1>Good food belongs<br>on every table.</h1><p>Coordinate surplus food, local donors, and people who need a helping hand.</p></div><div class='art-footer'><span>♧</span> Building kinder communities, one meal at a time</div></div><div class='login-side'><div class='login-box'><p class='eyebrow'>Welcome to ShareTable</p><h2>Sign in to your workspace</h2><p class='login-subtitle'>Use your registered username and password.</p>" + notice + "<form method='post' action='/login'><label>Workspace role<select name='role'><option value='consumer'>Consumer</option><option value='donor'>Donor</option><option value='admin'>Admin</option></select></label><label>Username<input name='username' required placeholder='Enter username'></label><label>Password<input name='password' type='password' required placeholder='Enter password'></label><button class='button full' type='submit'>Continue <span>→</span></button></form><p class='account-link'>New here? <a href='/register'>Create your own account</a></p></div></div></div>";
         return page("ShareTable | Sign in", body);
     }
 
     private static String registerPage(String error) {
         String notice = error == null ? "" : "<div class='notice error'>" + esc(error) + "</div>";
-        String body = "<div class='login-layout'><div class='login-art'><div class='brand light'><span class='brand-mark'>S</span><span>ShareTable</span></div><div class='art-copy'><p class='eyebrow light-text'>Join the table</p><h1>Turn extra food<br>into shared good.</h1><p>Create an account to donate surplus meals or request food from your local community.</p></div><div class='art-footer'>Your account is saved locally on this computer.</div></div><div class='login-side'><div class='login-box'><p class='eyebrow'>Create your account</p><h2>Start sharing today</h2><p class='login-subtitle'>Choose how you want to help the community.</p>" + notice + "<form method='post' action='/register'><label>Account type<select name='role'><option value='consumer'>Consumer - request food</option><option value='donor'>Donor - share food</option></select></label><label>Username<input name='username' required minlength='3' maxlength='24' placeholder='Choose a username'></label><label>Phone number<input name='phone' pattern='[0-9+() .-]{7,25}' placeholder='Optional contact number'></label><label>Password<input name='password' type='password' required minlength='6' placeholder='At least 6 characters'></label><button class='button full' type='submit'>Create account <span>→</span></button></form><p class='account-link'>Already registered? <a href='/'>Sign in here</a></p></div></div></div>";
+        String body = "<div class='login-layout'><div class='login-art'><div class='brand light'><img class='brand-logo' style='display:block;width:184px;height:auto;background:#fff;border-radius:8px' src='/logo.svg' alt='ShareTable logo'></div><div class='art-copy'><p class='eyebrow light-text'>Join the table</p><h1>Turn extra food<br>into shared good.</h1><p>Create an account to donate surplus meals or request food from your local community.</p></div><div class='art-footer'>Your account is saved locally on this computer.</div></div><div class='login-side'><div class='login-box'><p class='eyebrow'>Create your account</p><h2>Start sharing today</h2><p class='login-subtitle'>Choose how you want to help the community.</p>" + notice + "<form method='post' action='/register'><label>Account type<select name='role'><option value='consumer'>Consumer - request food</option><option value='donor'>Donor - share food</option></select></label><label>Username<input name='username' required minlength='3' maxlength='24' placeholder='Choose a username'></label><label>Phone number<input name='phone' pattern='[0-9+() .-]{7,25}' placeholder='Optional contact number'></label><label>Password<input name='password' type='password' required minlength='6' placeholder='At least 6 characters'></label><button class='button full' type='submit'>Create account <span>→</span></button></form><p class='account-link'>Already registered? <a href='/'>Sign in here</a></p></div></div></div>";
         return page("ShareTable | Create account", body);
     }
 
     private static String page(String title, String body) {
         String liveScript = body.contains("class='shell'") ? liveDashboardScript() : "";
-        return "<!doctype html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>" + title + "</title><style>" + styles() + messageStyles() + adminStyles() + "</style></head><body>" + body + liveScript + "</body></html>";
+        return "<!doctype html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'><link rel='icon' type='image/svg+xml' href='/logo.svg'><title>" + title + "</title><style>" + styles() + messageStyles() + adminStyles() + "</style></head><body>" + body + liveScript + "</body></html>";
     }
 
     private static String liveDashboardScript() {
@@ -556,7 +627,9 @@ public class FoodDonationServer {
         int result = 0;
         synchronized (donations) {
             for (Donation donation : donations) {
-                if (donation.donorGiven && donation.consumerGot) result += parseQuantity(donation.quantity);
+                for (Claim claim : donation.claims) {
+                    if ("Collected".equals(claim.status)) result += claim.quantity;
+                }
             }
         }
         return result;
@@ -639,29 +712,57 @@ public class FoodDonationServer {
         }
     }
 
+    private static void sendSvg(HttpExchange exchange) throws IOException {
+        byte[] content = Files.readAllBytes(Paths.get("share-table-logo.svg"));
+        exchange.getResponseHeaders().set("Content-Type", "image/svg+xml");
+        exchange.getResponseHeaders().set("Cache-Control", "public, max-age=3600");
+        exchange.sendResponseHeaders(200, content.length);
+        try (OutputStream output = exchange.getResponseBody()) {
+            output.write(content);
+        }
+    }
+
     private static class Donation {
         private final int id;
         private final String food;
         private final String quantity;
         private final String pickup;
+        private final String pickupTime;
         private final String date;
         private final String donorUsername;
         private final String donorPhone;
+        private final List<Claim> claims = new ArrayList<>();
+        private int remainingQuantity;
         private String status;
         private String consumerUsername;
         private boolean donorGiven;
         private boolean consumerGot;
 
-        private Donation(int id, String food, String quantity, String pickup, String date, String status, String donorUsername, String consumerUsername, String donorPhone) {
+        private Donation(int id, String food, String quantity, String pickup, String pickupTime, String date, String status, String donorUsername, String consumerUsername, String donorPhone) {
             this.id = id;
             this.food = food;
             this.quantity = quantity;
             this.pickup = pickup;
+            this.pickupTime = pickupTime;
             this.date = date;
             this.status = status;
             this.donorUsername = donorUsername;
             this.consumerUsername = consumerUsername;
             this.donorPhone = donorPhone;
+            this.remainingQuantity = parseQuantity(quantity);
+        }
+    }
+
+    private static class Claim {
+        private final int id;
+        private final String consumerUsername;
+        private final int quantity;
+        private String status = "Claim requested";
+
+        private Claim(int id, String consumerUsername, int quantity) {
+            this.id = id;
+            this.consumerUsername = consumerUsername;
+            this.quantity = quantity;
         }
     }
 

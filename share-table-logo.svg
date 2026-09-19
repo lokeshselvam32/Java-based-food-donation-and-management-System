@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Share Table Food Donation Logo</title>
+  <desc id="desc">A bowl of donated food held by two hands, with a heart above and Share Table text below.</desc>
+
+  <!-- Transparent background -->
+
+  <!-- Heart -->
+  <path fill="#F7941D" d="M512 286
+    C470 226 374 236 374 315
+    C374 376 430 413 512 486
+    C594 413 650 376 650 315
+    C650 236 554 226 512 286Z"/>
+
+  <!-- Food: bread -->
+  <path fill="#F7941D" d="M353 355
+    C393 315 472 319 514 365
+    L535 409 L342 408
+    C333 390 337 370 353 355Z"/>
+  <path fill="#FFFFFF" d="M411 365 Q432 342 452 339 Q436 360 417 374Z"/>
+  <path fill="#FFFFFF" d="M454 388 Q475 364 494 362 Q479 383 460 397Z"/>
+
+  <!-- Tomato -->
+  <path fill="#E94B35" d="M517 407
+    C514 366 548 345 584 350
+    C622 355 639 382 636 416
+    L540 425Z"/>
+  <path fill="#176B45" d="M555 358
+    C564 334 581 327 593 342
+    C602 320 625 314 636 330
+    C650 306 677 313 674 341
+    C670 368 648 386 623 397
+    L604 367 L584 384Z"/>
+
+  <!-- Bowl -->
+  <path fill="#176B45" d="M329 403
+    Q512 432 695 403
+    L676 515
+    C660 591 594 633 512 639
+    C430 633 364 591 348 515Z"/>
+  <path fill="#FFFFFF" d="M329 403 Q512 432 695 403
+    Q512 460 329 403Z"/>
+
+  <!-- Left helping hand -->
+  <path fill="#F7941D" d="M191 434
+    C235 449 280 490 331 532
+    C357 554 375 574 383 594
+    C362 623 315 633 271 614
+    C226 595 193 565 165 532
+    C143 506 137 470 146 442
+    C153 422 172 426 191 434Z"/>
+  <path fill="#FFFFFF" d="M295 548
+    C316 568 341 583 365 589
+    C351 601 331 604 311 597
+    C293 591 278 580 264 565
+    C275 555 284 551 295 548Z"/>
+
+  <!-- Right helping hand -->
+  <path fill="#63A644" d="M833 434
+    C789 449 744 490 693 532
+    C667 554 649 574 641 594
+    C662 623 709 633 753 614
+    C798 595 831 565 859 532
+    C881 506 887 470 878 442
+    C871 422 852 426 833 434Z"/>
+  <path fill="#FFFFFF" d="M729 548
+    C708 568 683 583 659 589
+    C673 601 693 604 713 597
+    C731 591 746 580 760 565
+    C749 555 740 551 729 548Z"/>
+
+  <!-- Wordmark -->
+  <text x="512" y="756" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="154" font-weight="800" letter-spacing="-8">
+    <tspan fill="#176B45">Share</tspan><tspan fill="#F7941D"> Table</tspan>
+  </text>
+
+  <!-- Subtitle lines -->
+  <line x1="92" y1="810" x2="214" y2="810" stroke="#3E7C55" stroke-width="5" stroke-linecap="round"/>
+  <line x1="810" y1="810" x2="932" y2="810" stroke="#3E7C55" stroke-width="5" stroke-linecap="round"/>
+  <text x="512" y="825" text-anchor="middle"
+        font-family="Arial, Helvetica, sans-serif"
+        font-size="43" font-weight="600" fill="#3E7C55">
+    Food Donation Web App
+  </text>
+</svg>
