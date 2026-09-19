@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: sharetable-food-donation
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeploy: true
