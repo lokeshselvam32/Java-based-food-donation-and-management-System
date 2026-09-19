@@ -156,7 +156,7 @@ public class LoginPage extends JFrame {
         button.setOpaque(true);
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         button.setPreferredSize(new Dimension(0, 48));
-        button.addActionListener(this::handleLogin);
+        button.addActionListener(event -> handleLogin());
         return button;
     }
 
@@ -189,7 +189,7 @@ public class LoginPage extends JFrame {
         field.setPreferredSize(new Dimension(0, 44));
     }
 
-    private void handleLogin(ActionEvent event) {
+    private void handleLogin() {
         String email = emailField.getText().trim();
         char[] password = passwordField.getPassword();
         boolean valid = email.contains("@") && email.contains(".") && password.length >= 6;
@@ -227,7 +227,7 @@ public class LoginPage extends JFrame {
         SwingUtilities.invokeLater(() -> {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-            } catch (Exception ignored) {
+            } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | javax.swing.UnsupportedLookAndFeelException ignored) {
                 // The default Swing look and feel is still usable.
             }
             LoginPage page = new LoginPage();
