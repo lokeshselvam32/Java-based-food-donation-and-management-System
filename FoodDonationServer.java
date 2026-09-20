@@ -1,5 +1,6 @@
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -132,7 +133,7 @@ public class FoodDonationServer {
             return;
         }
         if ("GET".equals(method) && "/admin-download".equals(path) && "admin".equals(role)) {
-            sendActivityCsv(exchange);
+            sendActivityPdf(exchange);
             return;
         }
         if ("GET".equals(method) && "/dashboard".equals(path)) {
@@ -258,6 +259,8 @@ public class FoodDonationServer {
                 if (String.valueOf(donation.id).equals(id) && claim != null && donation.donorUsername.equals(donorUsername)
                         && "Request accepted".equals(claim.status)) {
                     claim.status = "Food given";
+                    donation.consumerUsername = claim.consumerUsername;
+                    donation.donorGiven = true;
                 }
             }
         }
@@ -271,6 +274,8 @@ public class FoodDonationServer {
                 if (String.valueOf(donation.id).equals(id) && claim != null && claim.consumerUsername.equals(consumerUsername)
                         && "Food given".equals(claim.status)) {
                     claim.status = "Collected";
+                    donation.consumerUsername = claim.consumerUsername;
+                    donation.consumerGot = true;
                 }
             }
         }
@@ -345,7 +350,7 @@ public class FoodDonationServer {
         String accountName = username.isEmpty() ? title(role) : username;
         synchronized (donations) {
             for (Donation donation : donations) {
-                totalMeals += parseQuantity(donation.quantity);
+                totalMeals += donation.remainingQuantity;
             }
         }
         String content = "admin".equals(view) ? adminPanel(params, username) : "donor".equals(view) ? donorPanel(params, username) : consumerPanel(params, username);
@@ -374,7 +379,7 @@ public class FoodDonationServer {
         StringBuilder rows = new StringBuilder();
         synchronized (donations) {
             for (Donation donation : donations) {
-                rows.append("<tr><td><b>#").append(donation.id).append("</b></td><td><strong>").append(esc(donation.food)).append("</strong><small>").append(esc(donation.quantity)).append("</small></td><td>").append(esc(donation.pickup)).append("<small>Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</small></td><td><strong>").append(userDetails(donation.donorUsername, donation.donorPhone)).append("</strong></td><td><strong>").append(userDetails(donation.consumerUsername, "")).append("</strong></td><td>").append(badge(donation.status)).append("<small>Given: ").append(donation.donorGiven ? "Yes" : "No").append(" · Received: ").append(donation.consumerGot ? "Yes" : "No").append("</small></td></tr>");
+                rows.append("<tr><td><b>#").append(donation.id).append("</b></td><td><strong>").append(esc(donation.food)).append("</strong><small>").append(esc(donation.quantity)).append("</small></td><td>").append(esc(donation.pickup)).append("<small>Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</small></td><td><strong>").append(userDetails(donation.donorUsername, donation.donorPhone)).append("</strong></td><td><strong>").append(adminClaimDetails(donation)).append("</strong></td><td>").append(badge(donation.status)).append("<small>Given: ").append(donation.donorGiven ? "Yes" : "No").append(" · Consumer collected: ").append(donation.consumerGot ? "Yes" : "No").append("</small></td></tr>");
             }
         }
         String notice = params.containsKey("messaged") ? "<div class='notice success'>Message sent.</div>" : params.containsKey("given") ? "<div class='notice success'>Food handoff marked as given.</div>" : "";
@@ -391,26 +396,112 @@ public class FoodDonationServer {
         return esc(username) + (phone.isEmpty() ? "<small>Phone not provided</small>" : "<small>Phone: " + esc(phone) + "</small>");
     }
 
-    private static void sendActivityCsv(HttpExchange exchange) throws IOException {
-        StringBuilder csv = new StringBuilder("ID,Food,Quantity,Pickup,Pickup time,Donor,Donor phone,Consumer,Consumer phone,Status,Donor given,Consumer received\n");
-            synchronized (donations) {
-            for (Donation donation : donations) {
-                csv.append(csvValue(String.valueOf(donation.id))).append(',')
-                    .append(csvValue(donation.food)).append(',').append(csvValue(donation.quantity)).append(',')
-                    .append(csvValue(donation.pickup)).append(',').append(csvValue(donation.pickupTime)).append(',').append(csvValue(donation.donorUsername)).append(',')
-                    .append(csvValue(phoneFor(donation.donorUsername, donation.donorPhone))).append(',')
-                    .append(csvValue(donation.consumerUsername)).append(',').append(csvValue(phoneFor(donation.consumerUsername, ""))).append(',')
-                    .append(csvValue(donation.status)).append(',').append(donation.donorGiven ? "Yes" : "No").append(',')
-                    .append(donation.consumerGot ? "Yes" : "No").append('\n');
-            }
+    private static String adminClaimDetails(Donation donation) {
+        if (donation.claims.isEmpty()) return "No consumer request";
+        StringBuilder details = new StringBuilder();
+        for (Claim claim : donation.claims) {
+            if (details.length() > 0) details.append("<br>");
+            details.append(esc(claim.consumerUsername)).append(" - ").append(claim.quantity).append(" requested - ").append(badge(claim.status));
         }
-        byte[] content = csv.toString().getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "text/csv; charset=UTF-8");
-        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=sharetable-activity.csv");
+        return details.toString();
+    }
+
+    private static void sendActivityPdf(HttpExchange exchange) throws IOException {
+        byte[] content = buildActivityPdf();
+        exchange.getResponseHeaders().set("Content-Type", "application/pdf");
+        exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=sharetable-activity.pdf");
         exchange.sendResponseHeaders(200, content.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(content);
         }
+    }
+
+    private static byte[] buildActivityPdf() throws IOException {
+        List<List<String>> pages = new ArrayList<>();
+        List<String> page = new ArrayList<>();
+        page.add("ShareTable - Donor and Consumer Activity");
+        page.add("Generated: " + LocalDate.now());
+        page.add("");
+        synchronized (donations) {
+            for (Donation donation : donations) {
+                if (page.size() > 38) {
+                    pages.add(page);
+                    page = new ArrayList<>();
+                }
+                page.add("Donation #" + donation.id + " | " + donation.food);
+                page.add("Original quantity: " + donation.quantity + " | Remaining: " + donation.remainingQuantity);
+                page.add("Pickup: " + donation.pickup + " | Time: " + formatPickupTime(donation.pickupTime));
+                page.add("Donor: " + donation.donorUsername + " | Phone: " + phoneFor(donation.donorUsername, donation.donorPhone));
+                page.add("Status: " + donation.status + " | Donor given: " + (donation.donorGiven ? "Yes" : "No") + " | Consumer received: " + (donation.consumerGot ? "Yes" : "No"));
+                if (donation.claims.isEmpty()) {
+                    page.add("Requests: none");
+                } else {
+                    for (Claim claim : donation.claims) {
+                        page.add("Request #" + claim.id + ": " + claim.consumerUsername + " | Quantity: " + claim.quantity);
+                        page.add("Decision: " + claim.status + " | Consumer phone: " + phoneFor(claim.consumerUsername, ""));
+                    }
+                }
+                page.add("");
+            }
+        }
+        if (page.size() > 0) pages.add(page);
+        return createPdf(pages);
+    }
+
+    private static byte[] createPdf(List<List<String>> pages) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        List<Integer> offsets = new ArrayList<>();
+        List<Integer> pageObjectIds = new ArrayList<>();
+        List<Integer> contentObjectIds = new ArrayList<>();
+        int nextObject = 4;
+        for (int i = 0; i < pages.size(); i++) {
+            pageObjectIds.add(nextObject++);
+            contentObjectIds.add(nextObject++);
+        }
+        writePdf(output, "%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n", offsets);
+        writePdfObject(output, 1, "<< /Type /Catalog /Pages 2 0 R >>", offsets);
+        StringBuilder kids = new StringBuilder("[");
+        for (int pageId : pageObjectIds) kids.append(pageId).append(" 0 R ");
+        kids.append("]");
+        writePdfObject(output, 2, "<< /Type /Pages /Kids " + kids + " /Count " + pages.size() + " >>", offsets);
+        writePdfObject(output, 3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", offsets);
+        for (int i = 0; i < pages.size(); i++) {
+            String stream = pdfTextStream(pages.get(i));
+            writePdfObject(output, contentObjectIds.get(i), "<< /Length " + stream.getBytes(StandardCharsets.US_ASCII).length + " >>\nstream\n" + stream + "endstream", offsets);
+            writePdfObject(output, pageObjectIds.get(i), "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents " + contentObjectIds.get(i) + " 0 R >>", offsets);
+        }
+        int xref = output.size();
+        writePdf(output, "xref\n0 " + nextObject + "\n0000000000 65535 f \n", offsets);
+        for (int i = 1; i < nextObject; i++) writePdf(output, String.format("%010d 00000 n \n", offsets.get(i)), offsets);
+        writePdf(output, "trailer\n<< /Size " + nextObject + " /Root 1 0 R >>\nstartxref\n" + xref + "\n%%EOF\n", offsets);
+        return output.toByteArray();
+    }
+
+    private static String pdfTextStream(List<String> lines) {
+        StringBuilder stream = new StringBuilder("BT\n/F1 10 Tf\n50 760 Td\n");
+        for (String line : lines) {
+            stream.append("(").append(pdfText(line)).append(") Tj\n0 -14 Td\n");
+        }
+        return stream.append("ET\n").toString();
+    }
+
+    private static String pdfText(String value) {
+        StringBuilder safe = new StringBuilder();
+        for (char character : value.toCharArray()) {
+            if (character == '\\' || character == '(' || character == ')') safe.append('\\');
+            safe.append(character >= 32 && character <= 126 ? character : '?');
+        }
+        return safe.toString();
+    }
+
+    private static void writePdfObject(ByteArrayOutputStream output, int id, String value, List<Integer> offsets) throws IOException {
+        while (offsets.size() <= id) offsets.add(0);
+        offsets.set(id, output.size());
+        writePdf(output, id + " 0 obj\n" + value + "\nendobj\n", offsets);
+    }
+
+    private static void writePdf(ByteArrayOutputStream output, String value, List<Integer> offsets) throws IOException {
+        output.write(value.getBytes(StandardCharsets.US_ASCII));
     }
 
     private static String phoneFor(String username, String fallback) {
@@ -466,7 +557,7 @@ public class FoodDonationServer {
                             ? consumerClaimAction(donation, currentUser)
                             : donorClaimActions(donation);
                         String donorContact = "consumer".equals(panel) ? donorContact(donation) : "";
-                    cards.append("<article class='donation-card'><div class='food-icon'>").append(foodIcon(donation.food)).append("</div><div class='card-main'><div class='card-top'><span class='category'>DONATION #").append(donation.id).append("</span>").append(badge(donation.status)).append("</div><h3>").append(esc(donation.food)).append("</h3><p class='quantity'>").append(esc(donation.quantity)).append(" <span>•</span> ").append(donation.remainingQuantity).append(" remaining <span>•</span> ").append(esc(donation.pickup)).append(" <span>•</span> Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</p>").append(donorContact).append("<div class='card-bottom'><small>Posted ").append(donation.date).append("</small>").append(action).append("</div></div></article>");
+                    cards.append("<article class='donation-card'><div class='food-icon'>").append(foodIcon(donation.food)).append("</div><div class='card-main'><div class='card-top'><span class='category'>DONATION #").append(donation.id).append("</span>").append(badge(donation.status)).append("</div><h3>").append(esc(donation.food)).append("</h3><p class='quantity'>").append(esc(donation.quantity)).append(" <span>•</span> ").append(donation.remainingQuantity).append(" ").append(esc(quantityUnit(donation.quantity))).append(" remaining <span>•</span> ").append(esc(donation.pickup)).append(" <span>•</span> Pickup at ").append(esc(formatPickupTime(donation.pickupTime))).append("</p>").append(donorContact).append("<div class='card-bottom'><small>Posted ").append(donation.date).append("</small>").append(action).append("</div></div></article>");
                 }
             }
         }
@@ -518,6 +609,11 @@ public class FoodDonationServer {
     private static String formatPickupTime(String pickupTime) {
         if (pickupTime == null || pickupTime.isEmpty()) return "Time not provided";
         return pickupTime;
+    }
+
+    private static String quantityUnit(String quantity) {
+        if (quantity == null) return "";
+        return quantity.replaceFirst("^\\s*[0-9]+\\s*", "").trim();
     }
 
     private static String messagePanel(String role, String currentUser) {
